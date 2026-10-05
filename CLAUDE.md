@@ -1,5 +1,7 @@
 # CLAUDE.md - SimpMusic Project Guide for AI Agents
 
+> Fork-specific instructions: read root `AGENTS.md` and `FORK.md` first. They override conflicting upstream guidance below. This fork targets Android only; upstream notes are retained for reference.
+
 ## 🌐 Language Rule
 
 **Response language**: Always respond in **English**.

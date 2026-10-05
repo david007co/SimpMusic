@@ -1,3 +1,11 @@
+# SimpMusic Tasker — unofficial Android fork
+
+This fork adds foreground Tasker playlist-name autoplay. Read [FORK.md](FORK.md) for setup, limitations, Windows builds and the planned fork-release/Obtainium update flow. Fork APKs belong at [this repository's Releases](https://github.com/david007co/SimpMusic/releases); the upstream links below are attribution, not downloads of the Tasker fork. No fork release has been published yet.
+
+The original upstream README follows.
+
+---
+
 <div align="center"> <img src="https://raw.githubusercontent.com/maxrave-dev/SimpMusic/dev/fastlane/metadata/android/en-US/images/featureGraphic.png"> <h1>SimpMusic</h1>  
 A FOSS YouTube Music client for Android and Desktop with many features from<br>Spotify, SponsorBlock, ReturnYouTubeDislike using Compose Multiplatform to develop.
 <br> 

@@ -76,6 +76,11 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.currentStateAsState
+import androidx.compose.runtime.DisposableEffect
+import com.maxrave.simpmusic.TaskerAutoplay
 import androidx.navigation.NavController
 import coil3.compose.AsyncImage
 import coil3.compose.LocalPlatformContext
@@ -170,6 +175,7 @@ fun PlaylistScreen(
     playlistId: String,
     isYourYouTubePlaylist: Boolean,
     navController: NavController,
+    taskerRequestId: String? = null,
 ) {
     // Home shelves navigate with the browseEndpoint id, which is "VL" + the playlist id
     // (HomeParser reads title.runs[0].navigationEndpoint.browseEndpoint.browseId). Every radio
@@ -185,6 +191,34 @@ fun PlaylistScreen(
     val liked by viewModel.liked.collectAsStateWithLifecycle()
     val tracks by viewModel.tracks.collectAsStateWithLifecycle()
     val tracksListState by viewModel.tracksListState.collectAsStateWithLifecycle()
+
+    val autoplayReadyId by viewModel.autoplayReadyId.collectAsStateWithLifecycle()
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val lifecycleState by lifecycleOwner.lifecycle.currentStateAsState()
+    DisposableEffect(taskerRequestId) {
+        onDispose { taskerRequestId?.let { TaskerAutoplay.cancel(it) } }
+    }
+    LaunchedEffect(taskerRequestId, uiState, tracks, continuation, autoplayReadyId, lifecycleState) {
+        if (taskerRequestId == null || lifecycleState != Lifecycle.State.RESUMED ||
+            autoplayReadyId != id || viewModel.uiState.value !is PlaylistUIState.Success ||
+            viewModel.tracks.value.isEmpty()
+        ) return@LaunchedEffect
+        if (!viewModel.isAutoplayFirstTrackAllowed()) {
+            TaskerAutoplay.cancel(taskerRequestId)
+            return@LaunchedEffect
+        }
+        if (TaskerAutoplay.consume(
+                taskerRequestId,
+                id,
+                viewModel.uiState.value.data?.id,
+                viewModel.uiState.value is PlaylistUIState.Success && autoplayReadyId == id && viewModel.tracks.value.isNotEmpty() &&
+                    lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED),
+            )
+        ) {
+            // Exactly the Play-button queue replacement, never generic resume of an old queue.
+            viewModel.onUIEvent(PlaylistUIEvent.PlayAll)
+        }
+    }
 
     var showSearchBar by rememberSaveable { mutableStateOf(false) }
     var searchBarHeightPx by remember { mutableStateOf(0) }

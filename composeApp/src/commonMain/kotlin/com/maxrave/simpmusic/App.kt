@@ -249,12 +249,13 @@ fun App(
 
                     "playlist" -> {
                         data.getQueryParameter("list")?.let { playlistId ->
+                            val taskerRequestId = data.getQueryParameter("tasker_request_id")
                             if (playlistId.startsWith("OLAK5uy_")) {
                                 navController.navigate(AlbumDestination(browseId = playlistId))
                             } else if (playlistId.startsWith("VL")) {
-                                navController.navigate(PlaylistDestination(playlistId = playlistId))
+                                navController.navigate(PlaylistDestination(playlistId = playlistId, taskerRequestId = taskerRequestId))
                             } else {
-                                navController.navigate(PlaylistDestination(playlistId = "VL$playlistId"))
+                                navController.navigate(PlaylistDestination(playlistId = "VL$playlistId", taskerRequestId = taskerRequestId))
                             }
                         }
                     }

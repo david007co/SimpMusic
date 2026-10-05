@@ -6,4 +6,5 @@ import kotlinx.serialization.Serializable
 data class PlaylistDestination(
     val playlistId: String,
     val isYourYouTubePlaylist: Boolean = false,
+    val taskerRequestId: String? = null,
 )

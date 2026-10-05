@@ -46,3 +46,19 @@ sentry.properties
 /desktopApp/generated.conveyor.conf
 # Conveyor output directory
 /output/
+
+# Fork: private signing material and local/generated artifacts
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.key
+*.apk
+*.aab
+hs_err_pid*.log
+replay_pid*.log
+.env
+.env.*
+!.env.example
+.research/
+**/build/

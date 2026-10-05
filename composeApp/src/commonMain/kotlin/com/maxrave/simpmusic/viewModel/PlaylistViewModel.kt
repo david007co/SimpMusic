@@ -5,6 +5,8 @@ package com.maxrave.simpmusic.viewModel
 import androidx.compose.ui.graphics.Color
 import androidx.lifecycle.viewModelScope
 import com.maxrave.common.Config
+import com.maxrave.domain.manager.DataStoreManager
+import kotlinx.coroutines.flow.first
 import com.maxrave.domain.data.entities.DownloadState.STATE_DOWNLOADED
 import com.maxrave.domain.data.entities.DownloadState.STATE_DOWNLOADING
 import com.maxrave.domain.data.entities.PlaylistEntity
@@ -180,7 +182,10 @@ class PlaylistViewModel(
         checkDownloadedPlaylist = null
     }
 
+    val autoplayReadyId = MutableStateFlow<String?>(null)
+
     fun getData(id: String) {
+        autoplayReadyId.value = null
         resetData()
         viewModelScope.launch {
             // Check radio
@@ -215,6 +220,7 @@ class PlaylistViewModel(
                                     )
                                 _tracks.value = data.first.tracks
                                 _continuation.value = data.second
+                                autoplayReadyId.value = id
                                 if (data.second.isNullOrEmpty()) _tracksListState.value = ListState.PAGINATION_EXHAUST
                                 playlistRepository.insertRadioPlaylist(data.first.toPlaylistEntity())
                             }
@@ -255,6 +261,7 @@ class PlaylistViewModel(
                                     )
                                 _tracks.value = data.first.tracks
                                 _continuation.value = data.second
+                                autoplayReadyId.value = id
                                 if (data.second.isNullOrEmpty()) _tracksListState.value = ListState.PAGINATION_EXHAUST
                                 getPlaylistEntity(id = data.first.id, playlistBrowse = data.first)
                             }
@@ -431,7 +438,18 @@ class PlaylistViewModel(
         }
     }
 
+    suspend fun isAutoplayFirstTrackAllowed(): Boolean {
+        val first = tracks.value.firstOrNull() ?: return false
+        val settings: DataStoreManager by inject()
+        if (first.isExplicit && settings.explicitContentEnabled.first() == DataStoreManager.FALSE) {
+            makeToast("Autoplay blocked: the first playlist track is explicit.")
+            return false
+        }
+        return true
+    }
+
     fun onUIEvent(event: PlaylistUIEvent) {
+        com.maxrave.simpmusic.TaskerAutoplay.cancel()
         val data = uiState.value.data ?: return
         when (event) {
             is PlaylistUIEvent.ItemClick -> {

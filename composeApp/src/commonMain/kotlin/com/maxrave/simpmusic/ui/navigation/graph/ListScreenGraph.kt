@@ -81,6 +81,7 @@ fun NavGraphBuilder.listScreenGraph(
             PlaylistScreen(
                 playlistId = data.playlistId,
                 isYourYouTubePlaylist = data.isYourYouTubePlaylist,
+                taskerRequestId = data.taskerRequestId,
                 navController = navController,
             )
         }

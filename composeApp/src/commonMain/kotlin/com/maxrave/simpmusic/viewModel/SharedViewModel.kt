@@ -1087,7 +1087,18 @@ class SharedViewModel(
     private var _updateResponse = MutableStateFlow<UpdateData?>(null)
     val updateResponse: StateFlow<UpdateData?> = _updateResponse
 
+    private var isTaskerFork = false
+
+    fun configureTaskerFork(validCertificate: Boolean) {
+        isTaskerFork = true
+        _isOfficialBuild.value = validCertificate
+    }
+
     fun checkForUpdate() {
+        if (isTaskerFork) {
+            makeToast("SimpMusic Tasker is an independent fork. Updates are managed separately, not by upstream's updater.")
+            return
+        }
         viewModelScope.launch {
             _isCheckingUpdate.value = true
             val updateChannel = dataStoreManager.updateChannel.first()
@@ -1949,7 +1960,7 @@ class SharedViewModel(
         _reloadDestination.value = null
     }
 
-    fun shouldCheckForUpdate(): Boolean = runBlocking { dataStoreManager.autoCheckForUpdates.first() == TRUE }
+    fun shouldCheckForUpdate(): Boolean = !isTaskerFork && runBlocking { dataStoreManager.autoCheckForUpdates.first() == TRUE }
 
     private var _downloadFileProgress = MutableStateFlow<DownloadProgress>(DownloadProgress.INIT)
     val downloadFileProgress: StateFlow<DownloadProgress> get() = _downloadFileProgress

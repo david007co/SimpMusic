@@ -85,6 +85,9 @@ android {
 
     buildTypes {
         release {
+
+            versionNameSuffix = "-tasker.1"
+            buildConfigField("boolean", "IS_TASKER_FORK", "true")
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(
@@ -101,6 +104,7 @@ android {
             }
         }
         debug {
+            buildConfigField("boolean", "IS_TASKER_FORK", "false")
             isMinifyEnabled = false
             applicationIdSuffix = ".dev"
             versionNameSuffix = "-dev"
@@ -155,11 +159,21 @@ android {
     }
 }
 
+androidComponents {
+    onVariants(selector().withBuildType("release")) { variant ->
+        variant.applicationId.set("io.github.david007co.simpmusic")
+        val forkCode = providers.gradleProperty("forkVersionCode").orElse("1").map { it.toInt().also { code -> require(code > 0) } }
+        variant.outputs.forEach { it.versionCode.set(forkCode) }
+    }
+}
+
 dependencies {
     coreLibraryDesugaring(libs.desugaring)
+    testImplementation(libs.junit)
     val debugImplementation = "debugImplementation"
     debugImplementation(libs.ui.tooling)
     implementation(libs.activity.compose)
+    implementation(libs.compose.material3)
 
     // Custom Activity On Crash
     implementation(libs.customactivityoncrash)
