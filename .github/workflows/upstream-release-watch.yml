@@ -1,0 +1,78 @@
+name: Watch official releases
+
+on:
+  schedule:
+    - cron: '23 14 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: upstream-release-watch
+  cancel-in-progress: false
+
+jobs:
+  check:
+    if: github.repository == 'david007co/SimpMusic'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Report an official release needing integration
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const upstream = { owner: 'maxrave-dev', repo: 'SimpMusic' };
+            const { data: release } = await github.rest.repos.getLatestRelease(upstream);
+            if (release.draft || release.prerelease) throw new Error('Expected a published stable release.');
+            const { data: commit } = await github.rest.repos.getCommit({
+              ...upstream, ref: release.tag_name
+            });
+            const { data: tree } = await github.rest.git.getTree({
+              ...upstream, tree_sha: commit.commit.tree.sha
+            });
+            const coreLink = tree.tree.find(entry => entry.path === 'core' && entry.mode === '160000');
+            if (!coreLink) throw new Error('Official release Core gitlink not found; investigate manually.');
+            const { data: fork } = await github.rest.repos.get({ owner, repo });
+            const { data: comparison } = await github.rest.repos.compareCommits({
+              owner, repo, base: commit.sha, head: fork.default_branch
+            });
+
+            if (['ahead', 'identical'].includes(comparison.status)) {
+              core.info(`Official release ${release.tag_name} is already an ancestor of the fork default branch.`);
+              return;
+            }
+            const marker = `<!-- upstream-release:${release.id}:${commit.sha} -->`;
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: 'all', per_page: 100
+            });
+            if (issues.some(issue => !issue.pull_request && (issue.body || '').includes(marker))) {
+              core.info('This exact upstream release has already been reported.');
+              return;
+            }
+            await github.rest.issues.create({
+              owner, repo,
+              title: `Review official release ${release.tag_name}`,
+              body: [
+                marker,
+                `Official release: ${release.html_url}`,
+                `App commit: \`${commit.sha}\``,
+                `Core gitlink: \`${coreLink.sha}\``,
+                `Integration base: \`${fork.default_branch}\``,
+                '',
+                'This watcher has NOT merged, built, signed or published anything.',
+                '',
+                '- [ ] Review release notes and app/Core changes; verify the tag still resolves to this commit.',
+                '- [ ] Prepare a separate integration branch/PR; stop on conflicts, preserve Tasker and fork identity.',
+                '- [ ] Review workflow/build-script changes before executing them; keep signing secrets unavailable.',
+                '- [ ] Run focused tests and FOSS release build; inspect consent, dedup, lifecycle and exact queue replacement.',
+                '- [ ] Assign a new increasing fork versionCode and distinct display version/tag.',
+                '- [ ] Sign only the accepted APK with the permanent key; verify package, certificate and alignment.',
+                '- [ ] Publish a fork release; validate Obtainium update and Tasker behavior.',
+                '',
+                'Follow UPSTREAM_MAINTENANCE.md. Closed issues count as already reported; reopen to revisit.'
+              ].join('\n')
+            });
