@@ -86,7 +86,7 @@ android {
     buildTypes {
         release {
 
-            versionNameSuffix = "-tasker.1"
+            versionNameSuffix = "-tasker.2"
             buildConfigField("boolean", "IS_TASKER_FORK", "true")
             isMinifyEnabled = true
             isShrinkResources = true
