@@ -1,0 +1,133 @@
+name: Prepare and check upstream integration
+
+on:
+  schedule:
+    - cron: '43 14 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-integration
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: vars.TASKER_INTEGRATION_ENABLED == 'true' && github.repository == 'david007co/SimpMusic' && github.ref == 'refs/heads/feature/tasker-playlist-intent'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    outputs:
+      candidate_sha: ${{ steps.prepare.outputs.candidate_sha }}
+      candidate_branch: ${{ steps.prepare.outputs.candidate_branch }}
+      candidate_core_sha: ${{ steps.prepare.outputs.candidate_core_sha }}
+      ready: ${{ steps.prepare.outputs.ready }}
+      build_allowed: ${{ steps.prepare.outputs.build_allowed }}
+      review_required: ${{ steps.prepare.outputs.review_required }}
+      pr_number: ${{ steps.prepare.outputs.pr_number }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Test trusted orchestrator
+        run: python3 -B -m unittest discover -s scripts/maintenance -p 'test_*.py' -v
+      - name: Prepare candidate and review PR
+        id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -B scripts/maintenance/upstream_integration.py --apply
+
+  source-review:
+    needs: prepare
+    if: needs.prepare.outputs.ready == 'true' && needs.prepare.outputs.review_required == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: tasker-integration-review
+    permissions: {}
+    steps:
+      - name: Record explicit approval to execute changed build inputs
+        env:
+          CANDIDATE: ${{ needs.prepare.outputs.candidate_sha }}
+        run: |
+          printf 'Approved candidate for secret-free checks: %s\n' "$CANDIDATE"
+
+  check:
+    needs: [prepare, source-review]
+    if: >-
+      always() && needs.prepare.result == 'success' &&
+      needs.prepare.outputs.ready == 'true' &&
+      (needs.prepare.outputs.build_allowed == 'true' || needs.source-review.result == 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.prepare.outputs.candidate_sha }}
+          persist-credentials: false
+          submodules: false
+      - name: Fetch only the pinned official Core
+        env:
+          CORE_SHA: ${{ needs.prepare.outputs.candidate_core_sha }}
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, re, subprocess
+          pin = os.environ['CORE_SHA']
+          if not re.fullmatch(r'[0-9a-f]{40}', pin):
+              raise SystemExit('Invalid Core SHA')
+          def git(*args):
+              return subprocess.check_output(['git', '-c', 'core.hooksPath=/dev/null', *args], text=True).strip()
+          if git('rev-parse', 'HEAD:core') != pin:
+              raise SystemExit('Candidate Core mismatch')
+          pathlib.Path('core').mkdir(exist_ok=True)
+          git('-C', 'core', 'init', '--template=')
+          git('-C', 'core', 'fetch', '--no-tags', 'https://github.com/maxrave-dev/core.git', pin)
+          if git('-C', 'core', 'rev-parse', 'FETCH_HEAD^{commit}') != pin:
+              raise SystemExit('Fetched Core mismatch')
+          git('-C', 'core', 'checkout', '--detach', pin)
+          if pathlib.Path('core/.gitmodules').exists():
+              raise SystemExit('Nested Core modules require separate review/setup')
+          PY
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Install baseline SDK packages
+        run: sdkmanager 'platforms;android-37.0' 'build-tools;36.0.0'
+      - name: Test and build candidate without signing secrets
+        run: |
+          bash ./gradlew :androidApp:testDebugUnitTest :androidApp:assembleRelease \
+            -PisFullBuild=false -PforkVersionCode=1 --no-daemon --console=plain \
+            --max-workers=1 -Dorg.gradle.jvmargs=-Xmx4096m
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: candidate-only-not-for-release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            androidApp/build/outputs/apk/release/androidApp-universal-release-unsigned.apk
+            androidApp/build/test-results/testDebugUnitTest/*.xml
+          if-no-files-found: error
+          retention-days: 7
+
+  report:
+    needs: [prepare, source-review, check]
+    if: always() && needs.prepare.outputs.pr_number != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Attach pinned check result to review PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ needs.prepare.outputs.pr_number }}
+          CANDIDATE: ${{ needs.prepare.outputs.candidate_sha }}
+          RESULT: ${{ needs.check.result }}
+        run: |
+          gh pr comment "$PR" --repo "$GH_REPO" --body "Candidate $CANDIDATE: secret-free checks $RESULT. Run: https://github.com/$GH_REPO/actions/runs/$GITHUB_RUN_ID . Candidate APK is NOT a release. No signing or production merge occurred. Verify PR head still matches this SHA before accepting."

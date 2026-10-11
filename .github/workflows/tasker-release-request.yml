@@ -1,0 +1,46 @@
+name: Request release from accepted version state
+
+on:
+  push:
+    branches: [feature/tasker-playlist-intent]
+    paths: [fork-release.json]
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: tasker-release-request
+  cancel-in-progress: false
+
+jobs:
+  request:
+    if: vars.TASKER_RELEASE_ENABLED == 'true' && github.repository == 'david007co/SimpMusic'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # No checkout or candidate code, and no signing secrets.
+      - name: Dispatch release with accepted state
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, re, subprocess
+          repo, revision = os.environ['GH_REPO'], os.environ['GITHUB_SHA']
+          def api(path):
+              return json.loads(subprocess.check_output(['gh', 'api', path]))
+          current = api(f'repos/{repo}/commits/feature%2Ftasker-playlist-intent')['sha']
+          if current != revision:
+              raise SystemExit('Accepted branch advanced; review and dispatch current release manually')
+          entry = api(f'repos/{repo}/contents/fork-release.json?ref={revision}')
+          state = json.loads(base64.b64decode(entry['content']))
+          code, version = state['version_code'], state['version_name']
+          if type(code) is not int or not 3 <= code <= 2100000000 or not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+-tasker\.[1-9][0-9]*', version):
+              raise SystemExit('Invalid accepted release state')
+          if code == 3:
+              print('Existing accepted code 3 baseline; no new release requested')
+              raise SystemExit(0)
+          subprocess.run(['gh', 'workflow', 'run', 'tasker-release.yml', '--repo', repo,
+              '--ref', 'feature/tasker-playlist-intent', '-f', f'source_sha={revision}', '-f', f'version_code={code}', '-f', f'version_name={version}'], check=True)
+          PY

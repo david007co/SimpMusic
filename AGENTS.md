@@ -13,9 +13,9 @@ Read `FORK.md` before proposing changes. This file overrides upstream agent guid
 
 - Stable release identity: SimpMusic Tasker / `io.github.david007co.simpmusic`; debug identity unchanged. Keep exact single-certificate pin and fork upstream-updater guard.
 - Never regenerate the maintainer's signing key. No credentials, cookies, keystores, local.properties, crash logs or generated APKs in Git. Signing password is entered privately, never in arguments/logs/chat.
-- Set an explicit increasing `-PforkVersionCode=N` for releases; default code 1 is not safe for future publication. Archive accepted APKs outside Gradle build outputs.
-- Nine Android tests/release build passed; foreground release autoplay and same-key 1 → 2 update/data continuity user-confirmed. Obtainium delivery, screen-off, recreation/restore overlap and release-specific safety retests are not all validated.
-- Inherited workflows are `.yml.disabled` in this branch. Do not enable them unreviewed. Planned upstream-release integration is review/test-gated; automation/publication and CI signing custody remain unconfigured.
+- Set an explicit increasing `-PforkVersionCode=N` for releases; Gradle defaults now come from fork-release.json; update tracked state deliberately and never reuse a distributed code. Archive accepted APKs outside Gradle build outputs.
+- Nine Android tests/release build passed; foreground release autoplay and same-key 1 → 2 update/data continuity user-confirmed. Actual Obtainium update to tasker.2/code 3 also user-confirmed. Screen-off, recreation/restore overlap and release-specific safety retests remain incomplete.
+- Inherited workflows are `.yml.disabled` in this branch. Do not enable them unreviewed. Planned upstream-release integration is review/test-gated; notification watcher is live. Integration/check/release workflows are locally prepared, not activated; CI signing custody remains unapproved. Read UPSTREAM_MAINTENANCE.md; phase 2 LLM repair has no implementation or API access.
 
 ## Working practices
 

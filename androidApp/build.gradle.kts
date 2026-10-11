@@ -1,4 +1,5 @@
 import java.util.Properties
+import groovy.json.JsonSlurper
 
 val isFullBuild: Boolean =
     try {
@@ -11,6 +12,13 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.sentry.gradle)
     alias(libs.plugins.compose.compiler)
+}
+
+val forkRelease = JsonSlurper().parse(rootProject.file("fork-release.json")) as Map<*, *>
+val forkVersionName = forkRelease["version_name"] as String
+val forkVersionSuffix = forkVersionName.removePrefix(libs.versions.version.name.get())
+require(forkVersionSuffix.matches(Regex("-tasker\\.[1-9][0-9]*"))) {
+    "fork-release.json version must match upstream version with a Tasker suffix"
 }
 
 android {
@@ -86,7 +94,7 @@ android {
     buildTypes {
         release {
 
-            versionNameSuffix = "-tasker.2"
+            versionNameSuffix = forkVersionSuffix
             buildConfigField("boolean", "IS_TASKER_FORK", "true")
             isMinifyEnabled = true
             isShrinkResources = true
@@ -162,7 +170,7 @@ android {
 androidComponents {
     onVariants(selector().withBuildType("release")) { variant ->
         variant.applicationId.set("io.github.david007co.simpmusic")
-        val forkCode = providers.gradleProperty("forkVersionCode").orElse("1").map { it.toInt().also { code -> require(code > 0) } }
+        val forkCode = providers.gradleProperty("forkVersionCode").orElse(forkRelease["version_code"].toString()).map { it.toInt().also { code -> require(code > 0) } }
         variant.outputs.forEach { it.versionCode.set(forkCode) }
     }
 }

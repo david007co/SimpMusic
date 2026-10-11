@@ -18,6 +18,30 @@ Local ancestry review confirms v2.2.0 is not an ancestor of the current fork HEA
 
 No GitHub settings changed by the local implementation. A successful local check is not proof that Actions is active.
 
+## Revised target: useful automation in two phases
+
+User prefers meaningful end-to-end routine automation, not merely moving local signing to GitHub. Temporary local memory pressure is not the motivation. Notification-only watcher is live; the following integration automation is a target, not yet implemented.
+
+### Phase 1 — integrate, test, approve, release
+
+On a new official stable release, trusted automation resolves/pins its app commit and Core gitlink, creates a separate integration branch from the maintained fork, attempts a normal merge and opens a PR. Conflicts stop without automatic resolution and produce actionable evidence. Successful integration gets secret-free tests and Android FOSS build; failed checks stop. Upstream workflow additions must be quarantined/reviewed before the candidate branch is pushed, and candidate code must not receive write credentials or signing secrets.
+
+The maintainer reviews/merges the PR; accepted source triggers the release process. Automate explicit monotonic version allocation and display/tag naming as part of the reviewed change, with serialized release handling rather than trusting defaults. Protected approval gates signing, isolated verification creates a draft, maintainer publishes, Obtainium updates. Routine success should not require a local PC. Exception analysis and phone acceptance remain necessary. A clean merge plus unit tests does not prove Tasker/device behavior.
+
+Implementation must explicitly handle GitHub's rule that events created by GITHUB_TOKEN usually do not trigger other workflows: run candidate checks within the orchestrated workflow or use a deliberately scoped GitHub App if separate PR checks are needed. No broad personal token merely to bypass that rule. Keep write-token orchestration separate from candidate-code execution. Restrict integration to the official source and maintained fork base, detect superseded base/releases and duplicate jobs, and keep workflows/signing policy controlled by trusted source rather than newly merged upstream files.
+
+### Phase 2 — bounded LLM-assisted exception repair
+
+For conflicts/failed checks, optionally send sanitized diff/failure evidence to an explicitly chosen API provider/model for analysis and a proposed branch patch. This is not access to the current Zed conversation: automation needs its own API credentials, instructions, isolated execution and cost limits. Provider choice, billing/data-sharing and activation require separate approval; no API key in chat or source.
+
+Begin advisory-only. Later allow limited low-risk patch attempts on the candidate branch, bounded by file allowlist, attempt/time/token budget and deterministic checks. No production-branch write, workflow/identity/certificate/signing changes, arbitrary dependency or tool installation, credential access, environment approval or publication authority. Treat upstream files, issue bodies and logs as untrusted data, not instructions; prompt-injection defenses and sandboxing are needed. An API/model 'safe' verdict is not a security guarantee.
+
+A successful bounded repair can resume secret-free checks and return to the normal human PR/signing/publication gates. Sensitive changes, uncertainty, failing checks or exhausted budget stop and notify the maintainer. Never weaken tests or bypass gates simply to make an update pass. No LLM decides alone that an APK is safe to sign/publish. Device-only failures may still require human reproduction.
+
+### Current authorization boundary
+
+This revised plan records the agreed direction, not deployment permission. Integration implementation, commits/pushes/settings, cloud-key upload and LLM/API access remain staged. Prepared local signing workflow is still unactivated and may need revision to fit accepted-source triggering/version allocation. Do not introduce signing or API secrets while testing integration orchestration.
+
 ## Reviewed integration procedure
 
 For a reported release, fetch its exact official tag and verify app commit against the issue. Prepare a separate integration branch based on the current fork branch, then merge the resolved commit with no automatic conflict resolution. Retain fork customizations; a Git merge preserves changes only when compatible, not by guarantee. Inspect all changes to Tasker entry points/consent/request IDs, playlist route/readiness/PlayAll, queue/restore, identity/certificate pin and updater guard.
@@ -45,6 +69,32 @@ Recommended optional design:
 - Never print/decode secrets in logs, pass passwords as literal arguments, or upload temporary key/password files; clean them even on failure. GitHub logs do not reliably mask transformed secret bytes.
 
 **Decision pending:** user is considering CI signing; no authorization to upload signing material, create secret values, configure environments or enable automatic publication has been given. Do not ask for key/password in chat. Implementing notification does not authorize cloud signing.
+
+## Prepared release workflow — not activated
+
+`tasker-release.yml` is locally prepared for review, not committed/activated/tested on Actions. Manual dispatch accepts an explicit new versionCode (>3) and exact versionName already committed in the source. Both jobs are restricted to the maintained fork branch. Source checkout is the dispatch SHA with recursive submodules and no persisted credentials. The build installs the pinned-baseline SDK packages, runs nine focused tests and minified FOSS build, inspects metadata and uploads a run/attempt-specific unsigned APK with SHA256/source/Core evidence.
+
+The fresh signing job has no checkout/Gradle/source scripts/cache. It installs tools and downloads only this run's artifact, then rechecks existing release APK codes and tag availability after approval. It requires environment secrets `TASKER_KEYSTORE_BASE64` and `TASKER_KEYSTORE_PASSWORD`, uses the existing PKCS12 alias, verifies artifact digest/metadata, aligns/signs, verifies single expected signer/v2/v3/alignment and creates a draft prerelease targeting the dispatch commit. Secrets are exposed only to the signing step; child inspection/alignment tools receive a scrubbed environment and only apksigner receives the password variable. Temporary key cleanup handles ordinary errors; abrupt cancellation relies on ephemeral runner disposal, not guaranteed secure erasure.
+
+**Required before activation:** create and verify `tasker-release-signing` with reviewer david007co, exact allowed branch and bypass restrictions; simply referencing its name does NOT enforce approval. No repository signing secrets. An unprotected/missing environment is not an approval gate. Confirm cloud custody separately before privately uploading secrets. No keys/passwords in chat.
+
+Version checks include all existing APK assets and drafts but cannot recover codes from deleted releases/assets or independently distributed APKs. Keep complete canonical release history and never delete previously distributed version evidence. Codes >3 are only the known baseline floor, not an authoritative future high-water mark. Workflow concurrency prevents its own overlaps, not manual publishers. Do not create competing manual releases/tags while a run waits/builds/signs. Check code/tag again when publishing a draft, which may have become stale. Tag checks do not reserve a tag; branch changes after dispatch do not change the selected SHA.
+
+Actions are full-SHA pinned to verified official tag refs. No automatic merge or publication. Live Linux SDK provisioning, runner memory, API asset download behavior, environment gates and draft creation must be tested before claiming support. Next candidate would require a committed new suffix (e.g. tasker.3) and code >3; this preparation does not change app versions.
+
+## Implemented Phase 1 slice — local, not activated
+
+`upstream-integration.yml` orchestrates candidate preparation, optional `tasker-integration-review` approval for sensitive source/build changes, fresh read-only candidate checks and PR-result comment. It runs checks directly rather than relying on PR events generated by GITHUB_TOKEN. The trusted run SHA must equal current base; stale runs stop. Python script prepares merges in temporary bare Git repos, disables hooks/custom merge drivers, verifies fixed official Core pins and restores the exact trusted workflow subtree before pushing any candidate. No upstream workflow can be introduced into a candidate through this process. Conflicts record an issue without pushing conflict files. Duplicate/stale/modified candidates stop rather than force-push.
+
+`fork-release.json` starts at accepted code 3 / tasker.2; Gradle reads it for release defaults. Allocator writes next code/display name into clean candidate PRs, requires official numeric tag/catalog agreement and stops on mismatch rather than downgrading a later dev version. Current v2.2.0 tree-equivalence case is a no-op and allocates nothing. Version state is a tracked floor, not a substitute for retained release history; release workflow rechecks actual APKs/tags and rejects stale state.
+
+`tasker-release-request.yml` reacts to human-accepted branch changes to version state, reads the exact accepted SHA via API (no checkout), and explicitly dispatches the release workflow with that SHA/code/name. Code 3 initial baseline is intentionally ignored. Dispatch uses branch discovery but release run rejects SHA mismatch, preventing a branch-advance race from silently signing different source. No automatic PR merge. Bot acceptance using GITHUB_TOKEN would need explicit dispatch because push events are suppressed.
+
+Integration APKs are unsigned validation-only code 1 and must never be published/installed as releases. PR comments include candidate SHA/run/result but are not enforceable required GitHub checks; review the actual run and matching PR SHA before acceptance. Build packages remain pinned to this baseline SDK; future SDK/nested Core changes stop or require reviewed workflow adaptation.
+
+Activation requires separately authorized commit/push/settings. New automation is opt-in: repository Actions variables `TASKER_INTEGRATION_ENABLED` and `TASKER_RELEASE_ENABLED` must equal the exact string `true`; absent/other values skip entry jobs. Keep both unset until protections and settings are verified. The live notification watcher is independent of these switches. Uploading these workflows alone does not activate candidate preparation or signing. Create protected `tasker-integration-review` (no secrets) and `tasker-release-signing` environments with required reviewer and exact maintained-branch restriction. Missing protection would not enforce review. Repository must permit Actions to create PRs; currently that setting is unchecked. Decide/authorize this setting explicitly; it does not authorize automatic PR approval/merge in our code. No broad PAT needed. Retain read-only default token and job-scoped writes only.
+
+Offline validation: 37 Python tests, workflow YAML/shell/Python syntax checks passed. Gradle :androidApp:testDebugUnitTest :androidApp:tasks passed after JSON version configuration change (1m52s). Full rebuilt release after this change and live hosted workflow behavior remain unvalidated. All workflows/source/docs for this slice remain local/uncommitted; no settings/key upload/device install/publication.
 
 ## Sources
 

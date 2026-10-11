@@ -1,0 +1,274 @@
+name: Prepare signed Tasker draft release
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: 'Exact reviewed accepted source commit SHA'
+        required: true
+        type: string
+      version_code:
+        description: 'New increasing Android versionCode (greater than 3 and all fork releases)'
+        required: true
+        type: string
+      version_name:
+        description: 'Exact versionName already present in reviewed source, e.g. 2.2.0-tasker.3'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tasker-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: vars.TASKER_RELEASE_ENABLED == 'true' && github.repository == 'david007co/SimpMusic' && github.ref == 'refs/heads/feature/tasker-playlist-intent'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    outputs:
+      apk_sha256: ${{ steps.inspect.outputs.apk_sha256 }}
+      core_sha: ${{ steps.inspect.outputs.core_sha }}
+    steps:
+      - name: Validate dispatch inputs
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          CODE: ${{ inputs.version_code }}
+          VERSION: ${{ inputs.version_name }}
+        run: |
+          python3 - <<'PY'
+          import os, re
+          if not re.fullmatch(r'[0-9a-f]{40}', os.environ['SOURCE_SHA']) or os.environ['SOURCE_SHA'] != os.environ['GITHUB_SHA']:
+              raise SystemExit('Dispatch revision differs from reviewed source SHA')
+          code, version = os.environ['CODE'], os.environ['VERSION']
+          if not re.fullmatch(r'[1-9][0-9]{0,9}', code) or not 3 < int(code) <= 2100000000:
+              raise SystemExit('Invalid versionCode; must be greater than 3.')
+          if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+-tasker\.[1-9][0-9]*', version):
+              raise SystemExit('Invalid fork versionName.')
+          PY
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          submodules: recursive
+          persist-credentials: false
+      - name: Verify accepted version state
+        env:
+          CODE: ${{ inputs.version_code }}
+          VERSION: ${{ inputs.version_name }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          with open('fork-release.json') as source:
+              state = json.load(source)
+          if state['version_code'] != int(os.environ['CODE']) or state['version_name'] != os.environ['VERSION']:
+              raise SystemExit('Dispatch does not match accepted source version state')
+          PY
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Install Android packages
+        run: sdkmanager 'platforms;android-37.0' 'build-tools;36.0.0'
+      - name: Check existing fork APK versions and tag availability
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          CODE: ${{ inputs.version_code }}
+          VERSION: ${{ inputs.version_name }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, re, subprocess, tempfile
+          result = subprocess.check_output(['gh', 'api', '--paginate', '--slurp', f'repos/{os.environ["GH_REPO"]}/releases'])
+          releases = [r for page in json.loads(result) for r in page]
+          aapt = str(pathlib.Path(os.environ['ANDROID_HOME']) / 'build-tools/36.0.0/aapt')
+          for release in releases:
+              if release['tag_name'] == 'v' + os.environ['VERSION']:
+                  raise SystemExit('Release tag already used, including drafts.')
+              for asset in release['assets']:
+                  if not asset['name'].endswith('.apk'):
+                      continue
+                  with tempfile.TemporaryDirectory() as directory:
+                      apk = pathlib.Path(directory) / 'prior.apk'
+                      with apk.open('wb') as output:
+                          subprocess.run(['gh', 'api', '-H', 'Accept: application/octet-stream',
+                              f'repos/{os.environ["GH_REPO"]}/releases/assets/{asset["id"]}'], stdout=output, check=True)
+                      badging = subprocess.check_output([aapt, 'dump', 'badging', str(apk)], text=True)
+                      match = re.search(r"package: name='io.github.david007co.simpmusic' versionCode='([0-9]+)'", badging)
+                      if not match or int(os.environ['CODE']) <= int(match[1]):
+                          raise SystemExit('Existing release APK is invalid or code does not increase.')
+          tag_check = subprocess.run(['git', 'ls-remote', '--exit-code', 'origin', 'refs/tags/v' + os.environ['VERSION']], capture_output=True)
+          if tag_check.returncode != 2:
+              raise SystemExit('Tag exists or remote check failed.')
+          PY
+      - name: Test and build unsigned FOSS release
+        env:
+          CODE: ${{ inputs.version_code }}
+        run: |
+          bash ./gradlew :androidApp:testDebugUnitTest :androidApp:assembleRelease \
+            -PisFullBuild=false "-PforkVersionCode=$CODE" --no-daemon --console=plain \
+            --max-workers=1 -Dorg.gradle.jvmargs=-Xmx4096m
+      - name: Inspect unsigned APK and record source evidence
+        id: inspect
+        env:
+          CODE: ${{ inputs.version_code }}
+          VERSION: ${{ inputs.version_name }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, os, pathlib, subprocess
+          apk = pathlib.Path('androidApp/build/outputs/apk/release/androidApp-universal-release-unsigned.apk')
+          aapt = str(pathlib.Path(os.environ['ANDROID_HOME']) / 'build-tools/36.0.0/aapt')
+          text = subprocess.check_output([aapt, 'dump', 'badging', str(apk)], text=True)
+          expected = f"package: name='io.github.david007co.simpmusic' versionCode='{os.environ['CODE']}' versionName='{os.environ['VERSION']}'"
+          if not text.startswith(expected + ' ') and not text.startswith(expected + '\n'):
+              raise SystemExit('APK package/code/version does not match requested release.')
+          if 'application-debuggable' in text or "application-label:'SimpMusic Tasker'" not in text or "native-code: 'arm64-v8a' 'armeabi-v7a' 'x86_64'" not in text:
+              raise SystemExit('Expected nondebug universal fork APK.')
+          digest = hashlib.sha256(apk.read_bytes()).hexdigest()
+          core_sha = subprocess.check_output(['git', 'rev-parse', 'HEAD:core'], text=True).strip()
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'apk_sha256={digest}\ncore_sha={core_sha}\n')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as output:
+              output.write(f"### Review before approving signing\nSource: `{os.environ['GITHUB_SHA']}`\n\nCore: `{core_sha}`\n\nVersion: `{os.environ['VERSION']}` / `{os.environ['CODE']}`\n\nUnsigned SHA256: `{digest}`\n\nInspect source/workflow changes and test/build logs before environment approval.\n")
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: unsigned-tasker-${{ github.run_id }}-${{ github.run_attempt }}
+          path: androidApp/build/outputs/apk/release/androidApp-universal-release-unsigned.apk
+          if-no-files-found: error
+          retention-days: 7
+
+  sign-draft:
+    needs: build
+    if: vars.TASKER_RELEASE_ENABLED == 'true' && github.repository == 'david007co/SimpMusic' && github.ref == 'refs/heads/feature/tasker-playlist-intent'
+    environment: tasker-release-signing
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      # No source checkout, Gradle, candidate scripts or build cache in this job.
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Install signing tools before exposing key
+        run: sdkmanager 'build-tools;36.0.0'
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: unsigned-tasker-${{ github.run_id }}-${{ github.run_attempt }}
+          path: unsigned
+      - name: Recheck release history after approval
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          CODE: ${{ inputs.version_code }}
+          VERSION: ${{ inputs.version_name }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, re, subprocess, tempfile
+          pages = json.loads(subprocess.check_output(['gh', 'api', '--paginate', '--slurp', f'repos/{os.environ["GH_REPO"]}/releases']))
+          aapt = str(pathlib.Path(os.environ['ANDROID_HOME']) / 'build-tools/36.0.0/aapt')
+          for release in [r for page in pages for r in page]:
+              if release['tag_name'] == 'v' + os.environ['VERSION']:
+                  raise SystemExit('Release tag now exists.')
+              for asset in release['assets']:
+                  if not asset['name'].endswith('.apk'):
+                      continue
+                  with tempfile.TemporaryDirectory() as directory:
+                      apk = pathlib.Path(directory) / 'prior.apk'
+                      with apk.open('wb') as output:
+                          subprocess.run(['gh', 'api', '-H', 'Accept: application/octet-stream',
+                              f'repos/{os.environ["GH_REPO"]}/releases/assets/{asset["id"]}'], stdout=output, check=True)
+                      text = subprocess.check_output([aapt, 'dump', 'badging', str(apk)], text=True)
+                      match = re.search(r"package: name='io.github.david007co.simpmusic' versionCode='([0-9]+)'", text)
+                      if not match or int(os.environ['CODE']) <= int(match[1]):
+                          raise SystemExit('APK history invalid or versionCode no longer increases.')
+          # HTTP errors other than missing tag fail closed.
+          check = subprocess.run(['gh', 'api', f'repos/{os.environ["GH_REPO"]}/git/ref/tags/v{os.environ["VERSION"]}'], capture_output=True, text=True)
+          if check.returncode == 0 or 'HTTP 404' not in check.stderr:
+              raise SystemExit('Tag now exists or tag check failed.')
+          PY
+      - name: Verify artifact, sign and verify result
+        env:
+          KEYSTORE_BASE64: ${{ secrets.TASKER_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.TASKER_KEYSTORE_PASSWORD }}
+          EXPECTED_SHA: ${{ needs.build.outputs.apk_sha256 }}
+          CORE_SHA: ${{ needs.build.outputs.core_sha }}
+          CODE: ${{ inputs.version_code }}
+          VERSION: ${{ inputs.version_name }}
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, os, pathlib, re, subprocess, tempfile
+          key_bytes = base64.b64decode(os.environ.pop('KEYSTORE_BASE64'), validate=True)
+          password = os.environ.pop('KEYSTORE_PASSWORD')
+          if not key_bytes or not password:
+              raise SystemExit('Protected environment signing secrets missing.')
+          pin = '22aad284a1b3eb1aaf6494238eb61a2cf74bacecbd3f63b89721718db12820b3'
+          tools = pathlib.Path(os.environ['ANDROID_HOME']) / 'build-tools/36.0.0'
+          apk = pathlib.Path('unsigned/androidApp-universal-release-unsigned.apk')
+          if not re.fullmatch(r'[0-9a-f]{64}', os.environ['EXPECTED_SHA']) or hashlib.sha256(apk.read_bytes()).hexdigest() != os.environ['EXPECTED_SHA']:
+              raise SystemExit('Artifact digest mismatch.')
+          expected = f"package: name='io.github.david007co.simpmusic' versionCode='{os.environ['CODE']}' versionName='{os.environ['VERSION']}'"
+          def inspect(path):
+              text = subprocess.check_output([str(tools / 'aapt'), 'dump', 'badging', str(path)], text=True)
+              if (not text.startswith(expected + ' ') and not text.startswith(expected + '\n')) or 'application-debuggable' in text:
+                  raise SystemExit('Incorrect package/version or debuggable APK.')
+              if "application-label:'SimpMusic Tasker'" not in text or "native-code: 'arm64-v8a' 'armeabi-v7a' 'x86_64'" not in text:
+                  raise SystemExit('Incorrect branding or ABIs.')
+              return text
+          metadata = inspect(apk)
+          output = pathlib.Path('signed')
+          output.mkdir()
+          signed = output / 'SimpMusic-Tasker-universal-release.apk'
+
+          # Key exists only inside this temporary directory; passwords are not CLI literals.
+          with tempfile.TemporaryDirectory(dir=os.environ['RUNNER_TEMP']) as directory:
+              key = pathlib.Path(directory) / 'release.p12'
+              key.write_bytes(key_bytes)
+              key.chmod(0o600)
+              aligned = pathlib.Path(directory) / 'aligned.apk'
+              subprocess.run([str(tools / 'zipalign'), '-P', '16', '-f', '4', str(apk), str(aligned)], check=True)
+              subprocess.run([str(tools / 'apksigner'), 'sign', '--ks', str(key), '--ks-type', 'PKCS12',
+                  '--ks-key-alias', 'simpmusic-tasker', '--ks-pass', 'env:KEYSTORE_PASSWORD',
+                  '--key-pass', 'env:KEYSTORE_PASSWORD', '--out', str(signed), str(aligned)],
+                  env={**os.environ, 'KEYSTORE_PASSWORD': password}, check=True)
+          # Do not pass secrets to subsequent verification tools.
+          del key_bytes, password
+          verification = subprocess.check_output([str(tools / 'apksigner'), 'verify', '--verbose', '--print-certs', str(signed)], text=True)
+          if 'Number of signers: 1' not in verification or f'Signer #1 certificate SHA-256 digest: {pin}' not in verification:
+              raise SystemExit('Unexpected signer.')
+          if 'Verified using v2 scheme (APK Signature Scheme v2): true' not in verification or 'Verified using v3 scheme (APK Signature Scheme v3): true' not in verification:
+              raise SystemExit('Expected v2/v3 signatures.')
+          subprocess.run([str(tools / 'zipalign'), '-c', '-P', '16', '4', str(signed)], check=True)
+          if inspect(signed) != metadata:
+              raise SystemExit('Signed metadata differs.')
+          digest = hashlib.sha256(signed.read_bytes()).hexdigest()
+          notes = f"""## SimpMusic Tasker — draft for review
+
+          Version: `{os.environ['VERSION']}`; versionCode: `{os.environ['CODE']}`.
+          Package: `io.github.david007co.simpmusic`. Universal Android FOSS APK.
+          Source commit: `{os.environ['GITHUB_SHA']}`.
+          Core gitlink: `{os.environ['CORE_SHA']}`.
+          Workflow run: https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}
+          APK SHA-256: `{digest}`.
+          Signing certificate SHA-256: `{pin}`.
+
+          Foreground Tasker only; screen-off/headless operation unsupported.
+          Before publication, add reviewed change notes and device-validation evidence.
+          CI build/signature checks do not prove playback or data continuity.
+          See FORK.md and UPSTREAM_MAINTENANCE.md in the tagged source.
+          """
+          (output / 'release-notes.md').write_text(notes)
+          print(f'Verified signed APK SHA256: {digest}')
+          PY
+      - name: Create draft release only
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ inputs.version_name }}
+        run: |
+          gh release create "v$VERSION" signed/SimpMusic-Tasker-universal-release.apk \
+            --repo "$GH_REPO" --target "$GITHUB_SHA" --draft --prerelease \
+            --title "SimpMusic Tasker $VERSION" --notes-file signed/release-notes.md

@@ -28,10 +28,10 @@ Use a short recursive checkout, Windows JDK 21, Android command-line SDK tools a
 From the checkout in PowerShell, with JDK 21 selected:
 
 ```powershell
-.\gradlew.bat :androidApp:testDebugUnitTest :androidApp:assembleRelease -PisFullBuild=false -PforkVersionCode=2 --console=plain --max-workers=1 -Dorg.gradle.jvmargs=-Xmx4096m
+.\gradlew.bat :androidApp:testDebugUnitTest :androidApp:assembleRelease -PisFullBuild=false -PforkVersionCode=3 --console=plain --max-workers=1 -Dorg.gradle.jvmargs=-Xmx4096m
 ```
 
-Always set `forkVersionCode` explicitly for a release; increase it beyond every previously published code. Code 2 is the locally accepted update candidate, not a published release. Current display version is `2.2.0-tasker.1` and is independent of the code. Release R8 required a 4GiB heap on the development machine.
+`fork-release.json` records the accepted source version/code, currently `2.2.0-tasker.2` / 3; Gradle reads these defaults. `-PforkVersionCode=N` remains an override for explicit local candidates. Never publish an old/reused code. Integration automation allocates the next tracked version in the PR; release checks reject codes already present in GitHub release APKs. Preserve distributed-version history. Release R8 required a 4GiB heap on the development machine.
 
 Unsigned universal output: `androidApp/build/outputs/apk/release/androidApp-universal-release-unsigned.apk`.
 
@@ -53,15 +53,15 @@ Maintainer local signing command (PowerShell):
 
 Default keystore location is under the current user's `.android-signing\SimpMusicTasker`; `-Keystore` and `-BuildTools` can override paths. Alias: `simpmusic-tasker`. The script prompts privately, checks package/version/ABIs, alignment and expected certificate, and produces `SimpMusic-Tasker-universal-release.apk`. Do not distribute after any verification failure. Archive accepted APKs **outside build directories**, which Gradle may clean.
 
-Nine focused Android unit tests and minified release build passed. On the test device, foreground exact-playlist autoplay and a same-key code 1 → 2 update were user-confirmed, including retained login/settings and existing Tasker task. Release-specific failure/cancel/manual-navigation retests remain incomplete; these were checked in debug.
+Nine focused Android unit tests and minified release build passed. On the test device, foreground exact-playlist autoplay and a same-key code 1 → 2 update were user-confirmed, including retained login/settings and existing Tasker task. Actual Obtainium update to tasker.2/code 3 was also user-confirmed. Release-specific failure/cancel/manual-navigation retests remain incomplete; these were checked in debug.
 
 ## Upstream releases and Obtainium
 
 Planned flow: detect a new official release → prepare a pinned upstream integration PR, including its Core gitlink → preserve fork customizations → review/test/build → assign increasing code → sign with the same key → publish one universal APK on **this fork's** Releases → Obtainium updates from this fork.
 
-No blind conflict resolution or publication from unchecked merges. Upstream's built-in updater is disabled for the fork so it cannot substitute an official APK. Obtainium delivery and automated upstream integration are **not configured or validated yet**. Initial signing is local; CI signing requires a separate key-custody decision.
+No blind conflict resolution or publication from unchecked merges. Upstream's built-in updater is disabled for the fork so it cannot substitute an official APK. Obtainium delivery is user-validated. The notification watcher is live. Integration/checks, accepted-version release dispatch and isolated signing workflows are locally prepared but not activated/live-tested. See UPSTREAM_MAINTENANCE.md for activation gates. Signing remains local until cloud custody is separately approved.
 
-Inherited workflows are preserved as `.yml.disabled` and will not execute from this revision. Replace them deliberately with Android FOSS-only fork workflows before enabling automation. Workflow disabling is branch-specific; other inherited branches on GitHub still contain upstream workflow files. Keep repository Actions disabled until reviewed.
+Inherited workflows are preserved as `.yml.disabled` and will not execute from this revision. Replace them deliberately with Android FOSS-only fork workflows before enabling automation. Workflow disabling is branch-specific; other inherited branches on GitHub still contain upstream workflow files. Only reviewed fork workflows should be enabled; inherited workflow IDs on other branches require separate disabling.
 
 ## Source baseline
 
