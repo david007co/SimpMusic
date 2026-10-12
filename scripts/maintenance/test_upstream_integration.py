@@ -503,7 +503,9 @@ class ManualCheckTests(unittest.TestCase):
         for case in ("state", "boolean-code", "catalog", "invalid-catalog", "missing-state", "executable-state",
                      "symlink-state", "executable-catalog", "invalid-base-state", "invalid-tag"):
             with self.subTest(case=case):
-                self.git(self.app, "checkout", "--detach", original)
+                # Index-only mode fixtures leave the worktree intentionally different on
+                # Linux. Discard them only in this disposable test repository.
+                self.git(self.app, "checkout", "--force", "--detach", original)
                 commands.base = self.base
                 commands.release["tag_name"] = "v2.3.0"
                 if case in {"state", "boolean-code"}:
