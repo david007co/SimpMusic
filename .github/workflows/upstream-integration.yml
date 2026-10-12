@@ -141,7 +141,18 @@ jobs:
           distribution: temurin
           java-version: '21'
       - name: Install baseline SDK packages
-        run: sdkmanager 'platforms;android-37.0' 'build-tools;36.0.0'
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, subprocess
+          root = os.environ.get('ANDROID_HOME') or os.environ.get('ANDROID_SDK_ROOT')
+          if not root:
+              raise SystemExit('Runner Android SDK location is missing')
+          manager = pathlib.Path(root) / 'cmdline-tools/latest/bin/sdkmanager'
+          if not manager.is_file():
+              raise SystemExit(f'Runner Android command-line tools are missing: {manager}')
+          subprocess.run([str(manager), '--sdk_root=' + root,
+                          'platforms;android-37.0', 'build-tools;36.0.0'], check=True)
+          PY
       - name: Test and build candidate without signing secrets
         run: |
           bash ./gradlew :androidApp:testDebugUnitTest :androidApp:assembleRelease \
