@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -24,9 +25,12 @@ class LocalCommands(integration.Commands):
         self.issues = []
         self.moved = False
         self.release_reads = 0
+        self.pr = None
 
     def api(self, endpoint):
         self.calls.append(("api", endpoint))
+        if "/pulls/" in endpoint:
+            return self.pr
         if endpoint.endswith("releases/latest"):
             self.release_reads += 1
             if self.moved and self.release_reads > 1:
@@ -37,12 +41,14 @@ class LocalCommands(integration.Commands):
         return {"sha": self.upstream}
 
     def git(self, repo, *args, data=None, check=True, write=False):
+        self.calls.append(("git", *args, write))
         if args[0] == "push":
             self.calls.append(("push", *args))
             return subprocess.CompletedProcess(args, 0, b"", b"")
         if args[0] == "ls-remote":
             return subprocess.CompletedProcess(args, 0, self.remote.encode(), b"")
         if args[0] == "fetch":
+            self.calls.append(("fetch", *args, write))
             source = self.core if args[2] == integration.CORE else self.app
             # Only this test adapter enables local transport, never production.
             return self.run(["git", "-c", f"core.hooksPath={os.devnull}",
@@ -361,6 +367,243 @@ class IntegrationTests(unittest.TestCase):
         lines = output.read_text().splitlines()
         self.assertEqual(len(lines), 3)
         self.assertEqual(json.loads(lines[1].split("=", 1)[1]), "failure\nready=true")
+
+
+class ManualCheckTests(unittest.TestCase):
+    setUp = IntegrationTests.setUp
+    git = IntegrationTests.git
+    put = IntegrationTests.put
+    commit = IntegrationTests.commit
+    commands = IntegrationTests.commands
+    changed = IntegrationTests.changed
+
+    def repaired(self):
+        self.put(self.app, "gradle/libs.versions.toml", "[versions]\nversion-name = '2.3.0'\n")
+        self.git(self.app, "update-index", "--cacheinfo", "160000," + self.core_two + ",core")
+        upstream = self.changed()
+        commands = self.commands(upstream, "v2.3.0")
+        self.git(self.app, "merge", "--no-edit", self.base)
+        self.put(self.app, "fork-release.json", json.dumps({
+            "version_code": 4, "version_name": "2.3.0-tasker.1"}))
+        self.put(self.app, "repair.txt", "manual repair, not deterministic preparation\n")
+        candidate = self.commit(self.app, "manual repair")
+        commands.pr = {"state": "open", "merged_at": None,
+                       "head": {"repo": {"full_name": integration.FORK}, "sha": candidate},
+                       "base": {"repo": {"full_name": integration.FORK},
+                                "ref": integration.BASE, "sha": self.base}}
+        return commands, candidate
+
+    def check(self, commands, candidate, directory=None):
+        with patch.object(integration, "prepare", side_effect=AssertionError("must not prepare")):
+            out = integration.check_candidate(commands, directory or self.work, 7, candidate)
+        self.assertEqual((out["review_required"], out["build_allowed"]), ("true", "false"))
+        self.assertFalse(any(c[0] in {"push", "gh"} for c in commands.calls))
+        self.assertTrue(all(not c[-1] for c in commands.calls if c[0] == "git"))
+        forbidden = {"push", "checkout", "switch", "merge", "merge-tree", "commit-tree",
+                     "hash-object", "read-tree", "update-index", "write-tree"}
+        self.assertFalse(any(c[1] in forbidden for c in commands.calls if c[0] == "git"))
+        return out
+
+    def test_valid_repaired_candidate_and_no_execution_or_remote_writes(self):
+        commands, candidate = self.repaired()
+        head = self.git(self.app, "rev-parse", "HEAD")
+        with patch.dict(os.environ, {"GITHUB_SHA": self.base}):
+            out = self.check(commands, candidate)
+        self.assertEqual((out["status"], out["ready"]), ("review_required", "true"))
+        self.assertEqual((out["candidate_sha"], out["base_sha"], out["release_sha"]),
+                         (candidate, self.base, commands.upstream))
+        self.assertEqual((out["release_id"], out["release_tag"], out["pr_number"]), ("42", "v2.3.0", "7"))
+        self.assertEqual((out["candidate_core_sha"], out["release_core_sha"]), (self.core_two, self.core_two))
+        self.assertEqual((out["version_code"], out["version_name"]), ("4", "2.3.0-tasker.1"))
+        self.assertEqual(commands.release_reads, 2)
+        self.assertEqual(self.git(self.app, "rev-parse", "HEAD"), head)
+        self.assertFalse((self.work / "app.git" / "repair.txt").exists())
+        self.assertTrue(any(c[0] == "fetch" and c[3] == integration.CORE for c in commands.calls))
+
+    def test_pr_metadata_rejected(self):
+        commands, candidate = self.repaired()
+        original = json.dumps(commands.pr)
+        for case in ("head", "foreign-head", "foreign-base", "wrong-base", "closed", "merged", "stale-base"):
+            with self.subTest(case=case):
+                commands.pr = json.loads(original)
+                if case == "head":
+                    commands.pr["head"]["sha"] = self.base
+                elif case.startswith("foreign"):
+                    commands.pr[case.split("-")[1]]["repo"]["full_name"] = "other/SimpMusic"
+                elif case == "wrong-base":
+                    commands.pr["base"]["ref"] = "dev"
+                elif case == "closed":
+                    commands.pr["state"] = "closed"
+                elif case == "merged":
+                    commands.pr["merged_at"] = "today"
+                else:
+                    commands.pr["base"]["sha"] = self.common
+                out = self.check(commands, candidate)
+                self.assertEqual(out["ready"], "false")
+                self.assertIn("error", out)
+
+    def test_stale_trusted_base(self):
+        commands, candidate = self.repaired()
+        with patch.dict(os.environ, {"GITHUB_SHA": self.common}):
+            self.assertIn("Trusted workflow revision", self.check(commands, candidate)["error"])
+
+    def test_missing_ancestry(self):
+        commands, candidate = self.repaired()
+        for case, revision in (("base", commands.upstream), ("official", self.base)):
+            with self.subTest(case=case):
+                commands.pr["head"]["sha"] = revision
+                directory = self.root / case
+                directory.mkdir()
+                self.assertIn("ancestry", self.check(commands, revision, directory)["error"])
+
+    def test_workflow_edits_rejected(self):
+        commands, candidate = self.repaired()
+        self.put(self.app, ".github/workflows/untrusted.yml", "untrusted\n")
+        candidate = self.commit(self.app, "workflow edit")
+        commands.pr["head"]["sha"] = candidate
+        self.assertIn("workflow subtree", self.check(commands, candidate)["error"])
+
+    def test_core_mismatch(self):
+        commands, candidate = self.repaired()
+        self.git(self.app, "update-index", "--cacheinfo", "160000," + self.core_one + ",core")
+        candidate = self.commit(self.app, "wrong Core")
+        commands.pr["head"]["sha"] = candidate
+        self.assertIn("Core differs", self.check(commands, candidate)["error"])
+
+    def test_core_fetch_object_mismatch(self):
+        commands, candidate = self.repaired()
+        git = commands.git
+
+        def wrong_core(repo, *args, **kwargs):
+            if args[0] == "fetch" and args[2] == integration.CORE:
+                return git(repo, *args[:3], self.core_one, **kwargs)
+            return git(repo, *args, **kwargs)
+
+        with patch.object(commands, "git", side_effect=wrong_core):
+            self.assertIn("Core fetch did not match", self.check(commands, candidate)["error"])
+
+    def test_candidate_core_must_be_gitlink(self):
+        commands, candidate = self.repaired()
+        blob = self.git(self.app, "rev-parse", candidate + ":plain.txt")
+        self.git(self.app, "update-index", "--cacheinfo", f"100644,{blob},core")
+        self.git(self.app, "commit", "-m", "non-gitlink Core")
+        candidate = self.git(self.app, "rev-parse", "HEAD")
+        commands.pr["head"]["sha"] = candidate
+        self.assertIn("exact gitlink", self.check(commands, candidate)["error"])
+
+    def test_nested_core_gitmodules(self):
+        self.git(self.core, "checkout", "--detach", self.core_two)
+        self.put(self.core, "nested/.gitmodules", "untrusted\n")
+        self.core_two = self.commit(self.core, "nested submodule")
+        commands, candidate = self.repaired()
+        self.assertIn("nested .gitmodules", self.check(commands, candidate)["error"])
+
+    def test_version_mismatch_and_unsafe_files(self):
+        commands, original = self.repaired()
+        for case in ("state", "boolean-code", "catalog", "invalid-catalog", "missing-state", "executable-state",
+                     "symlink-state", "executable-catalog", "invalid-base-state", "invalid-tag"):
+            with self.subTest(case=case):
+                self.git(self.app, "checkout", "--detach", original)
+                commands.base = self.base
+                commands.release["tag_name"] = "v2.3.0"
+                if case in {"state", "boolean-code"}:
+                    self.put(self.app, "fork-release.json", json.dumps({
+                        "version_code": True if case == "boolean-code" else 99,
+                        "version_name": "2.3.0-tasker.1"}))
+                elif case in {"catalog", "invalid-catalog"}:
+                    self.put(self.app, "gradle/libs.versions.toml", "[versions]\nversion-name = '2.2.0'\n"
+                             if case == "catalog" else "[versions\n")
+                elif case == "missing-state":
+                    (self.app / "fork-release.json").unlink()
+                elif case == "invalid-base-state":
+                    self.git(self.app, "checkout", "--detach", self.base)
+                    self.put(self.app, "fork-release.json", "[]")
+                    commands.base = self.commit(self.app, "invalid base state")
+                    self.git(self.app, "checkout", "--detach", original)
+                    self.git(self.app, "merge", "--no-edit", "-s", "ours", commands.base)
+                elif case == "invalid-tag":
+                    commands.release["tag_name"] = "v02.3.0"
+                self.git(self.app, "add", ".")
+                if case in {"executable-state", "symlink-state", "executable-catalog"}:
+                    path = "gradle/libs.versions.toml" if case == "executable-catalog" else "fork-release.json"
+                    blob = self.git(self.app, "rev-parse", original + ":" + path)
+                    mode = "120000" if case == "symlink-state" else "100755"
+                    self.git(self.app, "update-index", "--cacheinfo", f"{mode},{blob},{path}")
+                self.git(self.app, "commit", "--allow-empty", "-m", case)
+                candidate = self.git(self.app, "rev-parse", "HEAD")
+                commands.pr["base"]["sha"] = commands.base
+                commands.pr["head"]["sha"] = candidate
+                directory = self.root / case
+                directory.mkdir()
+                out = self.check(commands, candidate, directory)
+                self.assertEqual(out["ready"], "false")
+                self.assertIn("error", out)
+
+    def test_tag_api_mismatch(self):
+        commands, candidate = self.repaired()
+        commands.upstream = self.base
+        self.assertIn("mismatch", self.check(commands, candidate)["error"])
+
+    def test_recheck_changes_fail_closed(self):
+        commands, candidate = self.repaired()
+        original_pr = json.dumps(commands.pr)
+        original_api = commands.api
+        for case in ("head", "base", "release", "tag", "official", "closed"):
+            with self.subTest(case=case):
+                commands.pr = json.loads(original_pr)
+                commands.release_reads = 0
+                pr_reads = 0
+
+                def api(endpoint):
+                    nonlocal pr_reads
+                    result = original_api(endpoint)
+                    if "/pulls/" in endpoint:
+                        pr_reads += 1
+                        if pr_reads == 2:
+                            if case == "head":
+                                result = json.loads(original_pr)
+                                result["head"]["sha"] = self.base
+                            elif case == "closed":
+                                result = dict(result, state="closed")
+                    if pr_reads == 2:
+                        if case == "base" and "/commits/" in endpoint and integration.FORK in endpoint:
+                            result = {"sha": self.common}
+                        elif endpoint.endswith("releases/latest"):
+                            if case == "release":
+                                result = dict(result, id=43)
+                            elif case == "tag":
+                                result = dict(result, tag_name="v2.4.0")
+                        elif case == "official" and "/commits/" in endpoint and integration.OFFICIAL in endpoint:
+                            result = {"sha": self.common}
+                    return result
+
+                directory = self.root / case
+                directory.mkdir()
+                with patch.object(commands, "api", side_effect=api):
+                    out = self.check(commands, candidate, directory)
+                self.assertEqual(out["ready"], "false")
+                self.assertIn("error", out)
+
+    def test_cli_requires_paired_exact_inputs_and_excludes_apply(self):
+        invalid = (("--check-pr", "0", "--candidate-sha", "a" * 40),
+                   ("--check-pr", "-1", "--candidate-sha", "a" * 40),
+                   ("--check-pr", "7"), ("--candidate-sha", "a" * 40),
+                   ("--check-pr", "7", "--candidate-sha", "HEAD"),
+                   ("--apply", "--check-pr", "7", "--candidate-sha", "a" * 40),
+                   ("--apply", "--candidate-sha", "a" * 40))
+        for args in invalid:
+            with self.subTest(args=args), patch.object(sys, "argv", ["check", *args]), \
+                    contextlib.redirect_stderr(io.StringIO()), patch.object(integration, "Commands") as commands:
+                with self.assertRaises(SystemExit) as error:
+                    integration.main()
+                self.assertEqual(error.exception.code, 2)
+                commands.assert_not_called()
+        with patch.object(sys, "argv", ["check", "--check-pr", "7", "--candidate-sha", "a" * 40]), \
+                patch.object(integration, "check_candidate", return_value={"status": "review_required"}) as check, \
+                patch.object(integration, "orchestrate") as prepare, patch.object(integration, "emit"):
+            self.assertEqual(integration.main(), 0)
+            self.assertEqual(check.call_args.args[2:], (7, "a" * 40))
+            prepare.assert_not_called()
 
 
 if __name__ == "__main__":
