@@ -96,6 +96,14 @@ Activation requires separately authorized commit/push/settings. New automation i
 
 Offline validation: 37 Python tests, workflow YAML/shell/Python syntax checks passed. Gradle :androidApp:testDebugUnitTest :androidApp:tasks passed after JSON version configuration change (1m52s). Full rebuilt release after this change and live hosted workflow behavior remain unvalidated. All workflows/source/docs for this slice remain local/uncommitted; no settings/key upload/device install/publication.
 
+## Manually repaired candidate checks — local preparation
+
+Draft PR #4 integrates official v2.3.0; initial candidate head is `52a5084f0f51da436114fc2aa644568c2b1b734a`. Local 37 maintenance tests, nine Android tests and minified unsigned release build passed. No production merge/signing/device acceptance.
+
+The locally prepared check-only route adds optional `pr_number` and `candidate_sha` manual inputs to upstream-integration.yml. Both blank retain normal latest-stable preparation; both supplied validate an existing same-repository open PR into the maintained branch. The validator executes only trusted base scripts, uses disposable bare repos and fixed public source URLs, and performs no remote writes/candidate execution. It requires exact requested PR head, current/trusted base ancestry, latest official release ancestry/tag agreement, identical trusted workflow subtree, exact official Core and expected next version allocation. Changed inputs fail closed. Every repaired candidate requires tasker-integration-review approval before the separate read-only build job. Report comments are SHA-linked evidence, not required checks or release approval. Candidate APK remains unsigned code1, never install/publish it.
+
+Deployment requires separate approval to commit/push the trusted automation update. The integration candidate must then incorporate that accepted base update, preserving workflow equality, and its new exact head must be used for dispatch. Do not run old SHA after updating base, relax ancestry/workflow checks or overwrite candidate edits. Signing activation remains separate. Local validation is not a hosted-run acceptance claim.
+
 ## Sources
 
 - https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions

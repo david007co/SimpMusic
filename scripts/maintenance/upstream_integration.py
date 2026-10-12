@@ -316,6 +316,99 @@ def orchestrate(commands, directory, apply=False):
     return output
 
 
+def check_candidate(commands, directory, pr_number, candidate_sha):
+    """Validate a manually repaired PR as data only, never regenerate its merge."""
+    output = {"status": "failed", "ready": "false", "build_allowed": "false",
+              "review_required": "true", "candidate_sha": "", "base_sha": "",
+              "release_sha": "", "release_core_sha": "", "candidate_core_sha": "",
+              "pr_number": ""}
+    try:
+        if type(pr_number) is not int or pr_number <= 0:
+            raise Stop("Expected a positive PR number")
+        candidate = sha(candidate_sha)
+        output.update(candidate_sha=candidate, pr_number=str(pr_number))
+
+        def inputs():
+            pr = commands.api(f"repos/{FORK}/pulls/{pr_number}")
+            if (pr.get("state") != "open" or pr.get("merged_at") is not None or
+                    pr["head"]["repo"]["full_name"] != FORK or
+                    pr["base"]["repo"]["full_name"] != FORK or
+                    pr["base"]["ref"] != BASE):
+                raise Stop("Expected an open same-repository PR into the maintained base")
+            if sha(pr["head"]["sha"]) != candidate:
+                raise Stop("PR head differs from requested candidate SHA")
+            base = sha(commands.api(f"repos/{FORK}/commits/{quote(BASE, safe='')}")["sha"])
+            if sha(pr["base"]["sha"]) != base:
+                raise Stop("PR base differs from current fork base")
+            trusted = os.environ.get("GITHUB_SHA")
+            if trusted and sha(trusted) != base:
+                raise Stop("Trusted workflow revision differs from current base; start a fresh run")
+            release, upstream = latest(commands)
+            if not re.fullmatch(r"v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)",
+                                release["tag_name"]):
+                raise Stop("Official release tag must be canonical vX.Y.Z")
+            return base, release, upstream
+
+        base, release, upstream = inputs()
+        output.update(base_sha=base, release_sha=upstream, release_id=str(release["id"]),
+                      release_tag=release["tag_name"])
+        repo = Path(directory) / "app.git"
+        commands.git(None, "init", "--bare", "--template=", str(repo))
+        for pin in (base, candidate):
+            commands.git(repo, "fetch", "--no-tags", f"https://github.com/{FORK}.git", pin)
+            if text(commands, repo, "rev-parse", "FETCH_HEAD^{commit}") != pin:
+                raise Stop("Fork fetch did not match exact commit")
+        commands.git(repo, "fetch", "--no-tags", f"https://github.com/{OFFICIAL}.git",
+                     "refs/tags/" + release["tag_name"])
+        if text(commands, repo, "rev-parse", "FETCH_HEAD^{commit}") != upstream:
+            raise Stop("Official tag moved or API/fetch commit mismatch")
+        for ancestor in (base, upstream):
+            if commands.git(repo, "merge-base", "--is-ancestor", ancestor, candidate,
+                            check=False).returncode:
+                raise Stop("Candidate is missing current base or official release ancestry")
+        if commands.git(repo, "ls-tree", "-z", base, "--", ".github/workflows").stdout != commands.git(
+                repo, "ls-tree", "-z", candidate, "--", ".github/workflows").stdout:
+            raise Stop("Candidate workflow subtree differs from trusted base")
+        official_core = core_pin(commands, repo, upstream)
+        candidate_core = core_pin(commands, repo, candidate)
+        output.update(release_core_sha=official_core, candidate_core_sha=candidate_core)
+        if candidate_core != official_core:
+            raise Stop("Candidate Core differs from official release Core")
+        core = Path(directory) / "core.git"
+        commands.git(None, "init", "--bare", "--template=", str(core))
+        commands.git(core, "fetch", "--no-tags", CORE, official_core)
+        if text(commands, core, "rev-parse", "FETCH_HEAD^{commit}") != official_core:
+            raise Stop("Core fetch did not match exact gitlink")
+        if any(Path(path).name == ".gitmodules" for path in text(
+                commands, core, "ls-tree", "-r", "--name-only", "-z", official_core).split("\0")):
+            raise Stop("Official Core contains nested .gitmodules; manual review required")
+
+        def source(revision, path):
+            entry = text(commands, repo, "ls-tree", revision, "--", path).split()
+            if len(entry) != 4 or entry[:2] != ["100644", "blob"] or entry[3] != path:
+                raise Stop(f"Missing or non-regular source file: {path}")
+            return text(commands, repo, "show", f"{revision}:{path}")
+
+        allocated = allocate(json.loads(source(base, "fork-release.json")),
+                             release["tag_name"], maximum_code=0)
+        state = json.loads(source(candidate, "fork-release.json"))
+        if json.dumps(state, sort_keys=True) != json.dumps(allocated, sort_keys=True):
+            raise Stop("Candidate version state differs from trusted base allocation")
+        catalog = tomllib.loads(source(candidate, "gradle/libs.versions.toml"))
+        if catalog.get("versions", {}).get("version-name") != release["tag_name"][1:]:
+            raise Stop("Candidate catalog version differs from official release tag")
+        output.update(version_code=str(allocated["version_code"]), version_name=allocated["version_name"],
+                      sensitive_changes=sorted(p for p in paths(commands, repo, base, candidate) if sensitive(p)))
+        current_base, current_release, current_upstream = inputs()
+        if (current_base, current_release["id"], current_release["tag_name"], current_upstream) != (
+                base, release["id"], release["tag_name"], upstream):
+            raise Stop("Base or official release changed; rerun from fresh pins")
+        output.update(status="review_required", ready="true")
+    except (Stop, OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError, AttributeError) as error:
+        output.update(status="failed", ready="false", error=str(error))
+    return output
+
+
 def emit(output, output_file=None):
     print(json.dumps(output, indent=2, ensure_ascii=True))
     if output_file:
@@ -329,11 +422,20 @@ def emit(output, output_file=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--apply", action="store_true", help="Authorize fork branch/PR or conflict issue writes")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--apply", action="store_true", help="Authorize fork branch/PR or conflict issue writes")
+    mode.add_argument("--check-pr", type=int, help="Validate an open fork PR without remote writes")
+    parser.add_argument("--candidate-sha", help="Exact PR head SHA required with --check-pr")
     args = parser.parse_args()
+    if args.check_pr is not None:
+        if args.check_pr <= 0 or args.candidate_sha is None or not SHA.fullmatch(args.candidate_sha):
+            parser.error("--check-pr requires a positive number and --candidate-sha exact SHA")
+    elif args.candidate_sha is not None:
+        parser.error("--candidate-sha requires --check-pr and cannot be used with --apply")
     with tempfile.TemporaryDirectory(prefix="simpmusic-upstream-") as directory:
         commands = Commands(directory)
-        output = orchestrate(commands, directory, args.apply)
+        output = (check_candidate(commands, directory, args.check_pr, args.candidate_sha)
+                  if args.check_pr is not None else orchestrate(commands, directory, args.apply))
         emit(output, os.environ.get("GITHUB_OUTPUT"))
     return 1 if "error" in output or output["status"] in {"failed", "conflict"} else 0
 
