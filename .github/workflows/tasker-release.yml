@@ -70,7 +70,18 @@ jobs:
           distribution: temurin
           java-version: '21'
       - name: Install Android packages
-        run: sdkmanager 'platforms;android-37.0' 'build-tools;36.0.0'
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, subprocess
+          root = os.environ.get('ANDROID_HOME') or os.environ.get('ANDROID_SDK_ROOT')
+          if not root:
+              raise SystemExit('Runner Android SDK location is missing')
+          manager = pathlib.Path(root) / 'cmdline-tools/latest/bin/sdkmanager'
+          if not manager.is_file():
+              raise SystemExit(f'Runner Android command-line tools are missing: {manager}')
+          subprocess.run([str(manager), '--sdk_root=' + root,
+                          'platforms;android-37.0', 'build-tools;36.0.0'], check=True)
+          PY
       - name: Check existing fork APK versions and tag availability
         env:
           GH_TOKEN: ${{ github.token }}
@@ -154,7 +165,17 @@ jobs:
           distribution: temurin
           java-version: '21'
       - name: Install signing tools before exposing key
-        run: sdkmanager 'build-tools;36.0.0'
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, subprocess
+          root = os.environ.get('ANDROID_HOME') or os.environ.get('ANDROID_SDK_ROOT')
+          if not root:
+              raise SystemExit('Runner Android SDK location is missing')
+          manager = pathlib.Path(root) / 'cmdline-tools/latest/bin/sdkmanager'
+          if not manager.is_file():
+              raise SystemExit(f'Runner Android command-line tools are missing: {manager}')
+          subprocess.run([str(manager), '--sdk_root=' + root, 'build-tools;36.0.0'], check=True)
+          PY
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           name: unsigned-tasker-${{ github.run_id }}-${{ github.run_attempt }}
