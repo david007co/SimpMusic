@@ -2,6 +2,7 @@ package com.maxrave.simpmusic.viewModel
 
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.lifecycle.viewModelScope
+import com.maxrave.common.AppIdentity
 import com.maxrave.common.Config
 import com.maxrave.common.Config.ALBUM_CLICK
 import com.maxrave.common.Config.DOWNLOAD_CACHE
@@ -10,6 +11,7 @@ import com.maxrave.common.Config.RECOVER_TRACK_QUEUE
 import com.maxrave.common.Config.SHARE
 import com.maxrave.common.Config.SONG_CLICK
 import com.maxrave.common.Config.VIDEO_CLICK
+import com.maxrave.common.LibraryChipType
 import com.maxrave.common.SELECTED_LANGUAGE
 import com.maxrave.common.STATUS_DONE
 import com.maxrave.domain.data.entities.AlbumEntity
@@ -26,6 +28,7 @@ import com.maxrave.domain.data.model.canvas.CanvasResult
 import com.maxrave.domain.data.model.download.DownloadProgress
 import com.maxrave.domain.data.model.intent.GenericIntent
 import com.maxrave.domain.data.model.metadata.Lyrics
+import com.maxrave.domain.data.model.promo.Promo
 import com.maxrave.domain.data.model.streams.TimeLine
 import com.maxrave.domain.data.model.update.UpdateData
 import com.maxrave.domain.data.player.GenericCastState
@@ -47,6 +50,7 @@ import com.maxrave.domain.mediaservice.handler.QueueData
 import com.maxrave.domain.mediaservice.handler.RepeatState
 import com.maxrave.domain.mediaservice.handler.SimpleMediaState
 import com.maxrave.domain.mediaservice.handler.SleepTimerState
+import com.maxrave.domain.mediaservice.handler.addToQueueBlock
 import com.maxrave.domain.repository.AlbumRepository
 import com.maxrave.domain.repository.CacheRepository
 import com.maxrave.domain.repository.LocalPlaylistRepository
@@ -69,6 +73,9 @@ import com.maxrave.simpmusic.expect.getDownloadFolderPath
 import com.maxrave.simpmusic.expect.ui.toByteArray
 import com.maxrave.simpmusic.getPlatform
 import com.maxrave.simpmusic.utils.VersionManager
+import com.maxrave.simpmusic.utils.decodePromos
+import com.maxrave.simpmusic.utils.shownPromoIds
+import com.maxrave.simpmusic.utils.withShownPromo
 import com.maxrave.simpmusic.viewModel.base.BaseViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -97,6 +104,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import org.jetbrains.compose.resources.getString
+import org.koin.core.component.inject
 import org.simpmusic.lastfm.completeLogin
 import simpmusic.composeapp.generated.resources.Res
 import simpmusic.composeapp.generated.resources.added_to_queue
@@ -133,6 +141,8 @@ class SharedViewModel(
     var isFirstMiniplayer: Boolean = false
     var isFirstSuggestions: Boolean = false
     var showedUpdateDialog: Boolean = false
+
+    private val appIdentity: AppIdentity by inject()
 
     private val _isCheckingUpdate = MutableStateFlow(false)
     val isCheckingUpdate: StateFlow<Boolean> = _isCheckingUpdate
@@ -309,7 +319,6 @@ class SharedViewModel(
             val checkGetVideoJob =
                 launch {
                     dataStoreManager.watchVideoInsteadOfPlayingAudio.collectLatest {
-                        Logger.w(tag, "GetVideo is $it")
                         _getVideo.value = it == TRUE
                     }
                 }
@@ -358,7 +367,6 @@ class SharedViewModel(
                 .distinctUntilChangedBy {
                     it.songEntity?.videoId
                 }.collectLatest { state ->
-                    Logger.w(tag, "NowPlayingState is $state")
                     canvasJob?.cancel()
                     _nowPlayingState.value = state
 
@@ -665,7 +673,7 @@ class SharedViewModel(
                         // Save canvas thumb url
                         data.canvasThumbUrl?.let { lyricsCanvasRepository.updateCanvasThumbUrl(videoId, it) }
                     } else {
-                        log("Get canvas miss from a source: ${response.message}", LogLevel.WARN)
+                        log("Get canvas miss from a source: ${response.message}")
                     }
                 }
             }
@@ -688,6 +696,44 @@ class SharedViewModel(
     }
 
     fun getString(key: String): String? = runBlocking { dataStoreManager.getString(key).first() }
+
+    /**
+     * The `promos` block the last config fetch saved, as it changes. Every DataStore write re-emits
+     * the whole settings file (the playback position is saved every few seconds), so only a change
+     * to this block's own text gets through.
+     */
+    fun cachedPromos(): Flow<List<Promo>> =
+        dataStoreManager
+            .getString(Promo.cacheKey(appIdentity.isDevBuild))
+            .distinctUntilChanged()
+            .map(::decodePromos)
+
+    /** The ids of the launch banners this app version has already shown. */
+    suspend fun shownPromos(): Set<String> =
+        shownPromoIds(
+            stored = dataStoreManager.getString(Promo.shownKey(appIdentity.isDevBuild)).first(),
+            appVersion = VersionManager.getVersionName(),
+        )
+
+    /** Each banner once per app version, however it was closed. */
+    fun markPromoShown(id: String) {
+        viewModelScope.launch {
+            val key = Promo.shownKey(appIdentity.isDevBuild)
+            dataStoreManager.putString(
+                key,
+                withShownPromo(dataStoreManager.getString(key).first(), VersionManager.getVersionName(), id),
+            )
+        }
+    }
+
+    // A Library tab asked for from outside the Library screen (a deep link); the screen selects it
+    // the next time it composes and clears the request.
+    private val _libraryTabRequest = MutableStateFlow<LibraryChipType?>(null)
+    val libraryTabRequest: StateFlow<LibraryChipType?> = _libraryTabRequest.asStateFlow()
+
+    fun requestLibraryTab(tab: LibraryChipType?) {
+        _libraryTabRequest.value = tab
+    }
 
     fun putString(
         key: String,
@@ -1052,7 +1098,7 @@ class SharedViewModel(
             getFormatFlowJob =
                 viewModelScope.launch {
                     streamRepository.getFormatFlow(mediaId).cancellable().collectLatest { f ->
-                        Logger.w(tag, "Get format for $mediaId: $f")
+                        Logger.d(tag, "Get format for $mediaId: itag ${f?.itag}, expires ${f?.expiredTime}")
                         if (f != null) {
                             _format.emit(f)
                         } else {
@@ -1099,8 +1145,10 @@ class SharedViewModel(
             makeToast("SimpMusic Tasker is an independent fork. Updates are managed separately, not by upstream's updater.")
             return
         }
+        // Raised before the coroutine starts, so Home's launch banner, which reads it right after
+        // startup, can never miss a check that is already under way but not yet marked.
+        _isCheckingUpdate.value = true
         viewModelScope.launch {
-            _isCheckingUpdate.value = true
             val updateChannel = dataStoreManager.updateChannel.first()
             dataStoreManager.putString(
                 "CheckForUpdateAt",
@@ -1137,6 +1185,10 @@ class SharedViewModel(
                     _isCheckingUpdate.value = false
                 }
             }
+        }.invokeOnCompletion {
+            // Also for a channel neither branch handles, and for a check that throws: the launch
+            // banner waits for this flag, so it must never stay raised.
+            _isCheckingUpdate.value = false
         }
     }
 
@@ -1339,7 +1391,7 @@ class SharedViewModel(
                                 ).collect {
                                     when (it) {
                                         is Resource.Error -> {
-                                            log("Insert SimpMusic Translated Lyrics Error ${it.message}")
+                                            log("Insert SimpMusic Translated Lyrics Error ${it.message}", LogLevel.WARN)
                                         }
 
                                         is Resource.Success -> {
@@ -1479,7 +1531,7 @@ class SharedViewModel(
         duration: Int,
     ) {
         lyricsCanvasRepository.getSimpMusicLyrics(videoId).collectLatest {
-            Logger.w(tag, "Get SimpMusic Lyrics for $videoId: $it")
+            Logger.d(tag, "Get SimpMusic Lyrics for $videoId: ${it::class.simpleName}")
             val data = it.data
             if (it is Resource.Success && data != null) {
                 Logger.d(tag, "Get SimpMusic Lyrics Success")
@@ -1645,7 +1697,7 @@ class SharedViewModel(
                         }
 
                         else -> {
-                            log("Get BetterLyrics Error: ${res.message}")
+                            log("Get BetterLyrics Error: ${res.message}", LogLevel.WARN)
                             getSimpMusicLyrics(
                                 song.videoId,
                                 song,
@@ -1700,7 +1752,7 @@ class SharedViewModel(
                 }
 
                 else -> {
-                    Logger.w(tag, "Get SimpMusic Translated Lyrics Error: ${response.message}")
+                    Logger.d(tag, "Get SimpMusic Translated Lyrics Error: ${response.message}")
                     getAITranslationLyrics(
                         videoId,
                         lyrics,
@@ -1845,7 +1897,10 @@ class SharedViewModel(
 
     fun addListToQueue(listTrack: ArrayList<Track>) {
         viewModelScope.launch {
-            if (listTrack.size == 1 && dataStoreManager.endlessQueue.first() == TRUE) {
+            // A radio, a mix or an Endless queue has no end to append to, so a single song (the swipe
+            // on a song row) goes right after the current one instead.
+            val endlessQueue = dataStoreManager.endlessQueue.first() == TRUE
+            if (listTrack.size == 1 && mediaPlayerHandler.queueData.value.addToQueueBlock(endlessQueue) != null) {
                 mediaPlayerHandler.playNext(listTrack.first())
                 makeToast(getString(Res.string.play_next))
             } else {
@@ -1907,6 +1962,12 @@ class SharedViewModel(
     fun getLyricsStyle() = dataStoreManager.lyricsStyle
 
     fun getLyricsOffsetMs() = dataStoreManager.lyricsOffsetMs
+
+    fun setLyricsOffsetMs(offsetMs: Int) {
+        viewModelScope.launch {
+            dataStoreManager.setLyricsOffsetMs(offsetMs)
+        }
+    }
 
     fun setThemeMode(mode: String) {
         viewModelScope.launch {
@@ -1988,7 +2049,7 @@ class SharedViewModel(
                         track = track,
                         videoId = track.videoId,
                         path = path,
-                        isVideo = nowPlayingScreenData.value.isVideo,
+                        isVideo = nowPlayingScreenData.value.isVideo && getVideo.value,
                     ).collectLatest {
                         _downloadFileProgress.value = it
                     }

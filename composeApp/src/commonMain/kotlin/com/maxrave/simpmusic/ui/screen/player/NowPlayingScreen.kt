@@ -79,8 +79,11 @@ import com.maxrave.simpmusic.ui.component.AddToPlaylistModalBottomSheet
 import com.maxrave.simpmusic.ui.component.FullscreenLyricsContent
 import com.maxrave.simpmusic.ui.component.FullscreenLyricsSheet
 import com.maxrave.simpmusic.ui.component.InfoPlayerBottomSheet
+import com.maxrave.domain.data.model.browse.album.Track
+import com.maxrave.domain.utils.toSongEntity
 import com.maxrave.simpmusic.ui.component.NowPlayingBottomSheet
 import com.maxrave.simpmusic.ui.component.QueueBottomSheet
+import com.maxrave.simpmusic.ui.component.QueuePosition
 import com.maxrave.simpmusic.ui.component.VoteLyricsDialog
 import com.maxrave.simpmusic.ui.icon.KeyboardArrowDown
 import com.maxrave.simpmusic.ui.icon.SimpIcons
@@ -93,6 +96,7 @@ import com.maxrave.simpmusic.ui.screen.player.content.NowPlayingContentM3Express
 import com.maxrave.simpmusic.ui.screen.player.content.NowPlayingContentSpotify
 import com.maxrave.simpmusic.ui.screen.player.content.NowPlayingContentState
 import com.maxrave.simpmusic.ui.screen.player.content.PlayerBackdropColor
+import com.maxrave.simpmusic.ui.screen.player.content.fullscreenCanvas
 import com.maxrave.simpmusic.ui.screen.player.content.toAudioQualityLabel
 import com.maxrave.simpmusic.viewModel.LyricsProvider
 import com.maxrave.simpmusic.viewModel.NowPlayingBottomSheetUIEvent
@@ -384,6 +388,9 @@ fun NowPlayingScreenContent(
     var showQueueBottomSheet by rememberSaveable {
         mutableStateOf(false)
     }
+    // A queue row's ⋯ in the Apple Music style, whose queue is a tab of this screen rather than a
+    // sheet: its position and the track that was there. The other styles' queue sheet hosts its own.
+    var queueMoreFor by remember { mutableStateOf<Pair<Int, Track>?>(null) }
 
     var showInfoBottomSheet by rememberSaveable {
         mutableStateOf(false)
@@ -423,7 +430,8 @@ fun NowPlayingScreenContent(
 
     LaunchedEffect(screenDataState) {
         Logger.d(TAG, "ScreenDataState: $screenDataState")
-        showHideMiddleLayout = screenDataState.canvasData == null
+        // Only a canvas that fills the page replaces it; animated artwork sits at its top.
+        showHideMiddleLayout = screenDataState.fullscreenCanvas() == null
     }
 
     // Palette generation lives in its own NEVER-restarting effect. Keyed on screenDataState it
@@ -525,7 +533,7 @@ fun NowPlayingScreenContent(
         }.distinctUntilChangedBy {
             it.canvasData?.url
         }.collectLatest {
-            if (it.canvasData != null && mainScrollState.value == 0) {
+            if (it.fullscreenCanvas() != null && mainScrollState.value == 0) {
                 showHideJob = false
             } else {
                 showHideJob = true
@@ -535,7 +543,7 @@ fun NowPlayingScreenContent(
     }
 
     LaunchedEffect(key1 = showHideControlLayout) {
-        if (showHideControlLayout && screenDataState.canvasData != null && mainScrollState.value == 0) {
+        if (showHideControlLayout && screenDataState.fullscreenCanvas() != null && mainScrollState.value == 0) {
             showHideJob = false
         }
     }
@@ -544,10 +552,10 @@ fun NowPlayingScreenContent(
         snapshotFlow { mainScrollState.value }
             .distinctUntilChanged()
             .collect {
-                if (it > 0 && !showHideControlLayout && screenDataState.canvasData != null) {
+                if (it > 0 && !showHideControlLayout && screenDataState.fullscreenCanvas() != null) {
                     showHideJob = true
                     showHideControlLayout = true
-                } else if (showHideControlLayout && it == 0 && screenDataState.canvasData != null) {
+                } else if (showHideControlLayout && it == 0 && screenDataState.fullscreenCanvas() != null) {
                     showHideJob = false
                 }
             }
@@ -677,6 +685,7 @@ fun NowPlayingScreenContent(
             onShowAddToPlaylist = { showAddToPlaylistDirectly = true },
             onShowFullscreenLyrics = { showFullscreenLyrics = true },
             onShowVoteDialog = { showVoteDialog = true },
+            onLyricsOffsetChange = { sharedViewModel.setLyricsOffsetMs(it) },
             onEnterFullscreenVideo = {
                 onDismiss()
                 navController.navigate(FullscreenDestination)
@@ -691,6 +700,7 @@ fun NowPlayingScreenContent(
             onRemoveQueueItem = { index ->
                 mediaPlayerHandler.removeMediaItem(index)
             },
+            onQueueItemMore = { index, track -> queueMoreFor = index to track },
         )
 
     // Below `state`/`actions`: the landscape lyrics layout renders the current style's own track row
@@ -704,7 +714,7 @@ fun NowPlayingScreenContent(
             val windowSize = LocalWindowInfo.current.containerSize
             val density = LocalDensity.current
             // DesktopApp makes the window transparent and clips its content to 12dp corners exactly
-            // when it draws the custom title bar (both gated on !isVM). A Popup is a layer of its own
+            // when it draws the custom title bar (both macOS-only). A Popup is a layer of its own
             // that clip never reaches, so the page rounds itself. getScreenSizeInfo() subtracts that
             // same bar, which makes the height difference the one signal commonMain can read.
             val windowIsRounded = windowSize.height > getScreenSizeInfo().hPX
@@ -803,6 +813,21 @@ fun NowPlayingScreenContent(
             onDismiss = {
                 showQueueBottomSheet = false
             },
+            navController = navController,
+            onNavigateToOtherScreen = {
+                showQueueBottomSheet = false
+                onDismiss()
+            },
+        )
+    }
+
+    queueMoreFor?.let { (index, track) ->
+        NowPlayingBottomSheet(
+            onDismiss = { queueMoreFor = null },
+            navController = navController,
+            song = track.toSongEntity(),
+            queuePosition = QueuePosition(index, track.videoId),
+            onNavigateToOtherScreen = { onDismiss() },
         )
     }
 
