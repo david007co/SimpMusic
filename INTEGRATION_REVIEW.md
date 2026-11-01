@@ -1,4 +1,29 @@
-# Official v2.3.0 integration candidate
+# Official v2.5.0 integration candidate
+
+## Current preparation — 2026-11-01
+
+Isolated worktree `C:\src\SimpMusic-v250`, branch `integration/v2.5.0-review`. User authorized candidate commit/push/PR preparation and hosted review-gated checks. Merge is prepared locally; no production merge/signing/publication authorized by that step. Historical v2.3 evidence below is retained and is NOT v2.5 validation.
+
+- Accepted fork base: `5c908e09c380d125f8b5963aa8fbcc114cf8e15e`.
+- Official v2.5.0 app: `b5cff20a32f8b8bfaa720a83a81320b4c988dba3`; release ID `430426442`.
+- Official/candidate Core: `1830a60416dcac82d402fcedcc92c09fde94d567` (checked out exactly, clean); prior Core `2894e549763b8a68225b4456d3290f3227bdbb01`.
+- Proposed version state: `2.5.0-tasker.1` / code `6`, not reserved; current public release history/tracked base reviewed before commit shows code5 as latest known floor and no published v2.5 fork tag. Private drafts and actual APK version-code history are rechecked by the release workflow before signing.
+- Reproduced exactly one conflict: `.github/workflows/android.yml.disabled`. Preserved ENTIRE trusted workflow subtree from accepted fork base in index/worktree; no workflow diff or unmerged paths remain. Maintained checkout source left unchanged at its older local revision `440aaab4`; fetching added Git objects/refs only.
+- MainActivity, PlaylistScreen and PlaylistViewModel have no diff against accepted base. SharedViewModel delta concerns lyrics/promos/recognition; fork package/certificate source remains present. No new Tasker-specific blocker identified in source review; merged App routing and runtime interactions still require targeted validation.
+- Build input changes: AGP9.4.1→9.5.0 and lazy FOSS Sentry task wiring; wrapper/settings unchanged. No candidate execution, unit tests or Gradle builds performed. Android release tests/build remain a separate next gate.
+- `git diff --check HEAD` reports two inherited upstream README trailing-whitespace lines (60,63); not repaired as unrelated. Empty workflow and unmerged-path comparisons passed; Core clean/exact pin passed. These checks are not runtime validation.
+
+### Decisions required before release
+
+New optional recognition adds RECORD_AUDIO and a protected Quick Settings tile; recognition computes a fingerprint locally and sends it to `amp.shazam.com` (not raw PCM in reviewed code). Prior microphone grant allows recognition to start when its sheet opens, including an external recognize deep link. Its recording job is composition-scoped without Activity-pause cancellation; Home/lock may leave work active until completion/disposal, subject to Android restrictions. Source-supported risk, not device-reproduced. User explicitly chooses to retain microphone recognition unchanged and manage permission personally in Android app settings. No hard-disable or lifecycle fix made; permission control does not eliminate the described behavior when granted. Keep privacy/lifecycle caveat in release review.
+
+Core adds a second mutable remote cipher-config registry (Metrolist); first non-null primary config wins, so this is missing-hash coverage, not guaranteed stale-primary failover. Repeat One/manual Next/Previous/crossfade behavior changed and deserves playback acceptance. No schema/migration changes identified. Smart Downloads ownership/disable concerns remain unfixed: keep OFF. Screen-off Tasker remains unsupported.
+
+### Next gates
+
+Recognition disposition accepted as above. Proceed with authorized candidate commit/push/PR preparation, then the maintained workflow's check-only repaired-PR route using exact PR number/head SHA and source-review gate. Hosted focused tests/minified FOSS build must pass before merge; no local Gradle build run. Before remote changes, recheck latest release/base/history and preservation against exact final candidate tree. No source approval or signing implied by this local repair.
+
+# Historical official v2.3.0 integration candidate
 
 ## Status — 2026-10-11
 
